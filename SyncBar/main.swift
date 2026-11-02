@@ -1,4 +1,21 @@
-// SyncBar v2.2.1: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
+// SyncBar v2.2.2: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
+// v2.2.2 fixes the "already running" loop found 2026-11-01 23:03-23:04:
+//  - A deskflow-core (or sync-receiver / sync-sender) that outlived the
+//    SyncBar instance that started it holds its lock / port, but the new
+//    SyncBar instance has no Process for it, so it launches a duplicate
+//    that exits immediately ("an instance of deskflow core is already
+//    running", "bind: Address already in use"), the termination handler
+//    sets the menu to Stopped, and the next click repeats the loop while
+//    the original child is actually still running.
+//  - Fix: every start now kills ALL processes of that name first and
+//    WAITS until none remain (SIGTERM, then SIGKILL after a timeout)
+//    before launching a fresh, tracked child. Starting a duplicate while
+//    the old one is still shutting down was the other half of the same
+//    bug: the old pkill-then-start-immediately sequence gave the new
+//    core no time to see a clear lock. startCore/startSender now return
+//    Bool so a failed start shows "core exited" instead of a false
+//    "running" status, and the receiver is no longer restarted into a
+//    port that is already bound.
 // No hotkey. One sending mode at a time; the receiver is always on.
 // Languages: zh / en / ja / fr / de / es, plus "follow system".
 // Language is chosen from the menu (no restart needed) and persisted.
@@ -183,6 +200,37 @@ func runCapture(_ path: String, _ args: [String]) -> String {
     do { try p.run(); p.waitUntilExit() } catch { return "" }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+}
+
+// --- v2.2.2: kill-before-start helpers ---
+// PIDs of currently running processes with this exact name (empty if none).
+func pids(for name: String) -> [Int32] {
+    let out = runCapture("/usr/bin/pgrep", ["-x", name])
+    if out.isEmpty { return [] }
+    return out.components(separatedBy: .newlines).compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+}
+
+// Kill every process of this name and wait until none remain. Returns true
+// when the name is clear, false if a process stubbornly survives SIGKILL.
+// This must run before launching a child of the same name: deskflow-core
+// holds a lock file, sync-receiver holds port 42421, and a duplicate
+// launched while the old one is still shutting down exits immediately
+// with "already running" / "address already in use".
+func killAllAndWait(_ name: String) -> Bool {
+    if pids(for: name).isEmpty { return true }
+    runAndWait("/usr/bin/pkill", ["-x", name])
+    for _ in 0..<30 {
+        if pids(for: name).isEmpty { return true }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    runAndWait("/usr/bin/pkill", ["-9", "-x", name])
+    for _ in 0..<20 {
+        if pids(for: name).isEmpty { return true }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    let remaining = pids(for: name)
+    log("killAllAndWait: \(name) still running: \(remaining)")
+    return remaining.isEmpty
 }
 
 func appendHandle(_ path: String) -> FileHandle? {
@@ -713,16 +761,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             roleIsServer = devices.isServer
             if mode == .edge {
                 stopProcess(coreProc); coreProc = nil
-                runAndWait("/usr/bin/pkill", ["-x", "deskflow-core"])
-                startCore()
-                switching = false
-                updateUI(.edgeRunning)
+                if startCore() {
+                    switching = false
+                    updateUI(.edgeRunning)
+                } else {
+                    mode = .stopped; switching = false
+                    updateUI(.coreExited)
+                }
             } else if mode == .broadcast {
                 stopProcess(senderProc); senderProc = nil
-                runAndWait("/usr/bin/pkill", ["-x", "sync-sender"])
-                startSender()
-                switching = false
-                updateUI(.broadcastRunning)
+                if startSender() {
+                    switching = false
+                    updateUI(.broadcastRunning)
+                } else {
+                    mode = .stopped; switching = false
+                    updateUI(.senderExited)
+                }
             } else {
                 switching = false
                 updateUI(.stopped)
@@ -746,10 +800,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             _ = applyDevicesToDeskflow()
             if mode == .edge {
                 stopProcess(coreProc); coreProc = nil
-                runAndWait("/usr/bin/pkill", ["-x", "deskflow-core"])
-                startCore()
-                switching = false
-                updateUI(.edgeRunning)
+                if startCore() {
+                    switching = false
+                    updateUI(.edgeRunning)
+                } else {
+                    mode = .stopped; switching = false
+                    updateUI(.coreExited)
+                }
             } else {
                 // Broadcast target is the peer address in both roles, so a
                 // role change alone needs no sender restart.
@@ -769,17 +826,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(newMode.rawValue, forKey: "SyncBar.mode")
         updateUI(.switching)
         DispatchQueue.global(qos: .userInitiated).async { [self] in
+            var ok = true
             if newMode == .edge {
                 stopProcess(senderProc); senderProc = nil
                 runAndWait("/usr/bin/pkill", ["-x", "sync-sender"])
-                startCore()
+                ok = startCore()
             } else if newMode == .broadcast {
                 stopProcess(coreProc); coreProc = nil
                 runAndWait("/usr/bin/pkill", ["-x", "deskflow-core"])
-                startSender()
+                ok = startSender()
             }
             switching = false
-            updateUI(newMode == .edge ? .edgeRunning : .broadcastRunning)
+            if ok {
+                updateUI(newMode == .edge ? .edgeRunning : .broadcastRunning)
+            } else {
+                mode = .stopped
+                updateUI(newMode == .edge ? .coreExited : .senderExited)
+            }
         }
     }
 
@@ -804,7 +867,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         runAndWait("/usr/bin/pkill", ["-x", "sync-receiver"])
     }
 
-    func startCore() {
+    // v2.2.2: kill-before-start. A tracked child that is already running
+    // is fine; an untracked one must be killed and waited out first, or
+    // the new child exits immediately on the old one's lock / port.
+    @discardableResult func startCore() -> Bool {
+        if coreProc?.isRunning == true { return true }
+        coreProc = nil
+        guard killAllAndWait("deskflow-core") else {
+            log("core start aborted: old deskflow-core still running")
+            return false
+        }
         roleIsServer = devices.isServer
         let arg = devices.isServer ? "server" : "client"
         let p = Process()
@@ -818,11 +890,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.updateUI(.coreExited)
             }
         }
-        do { try p.run(); coreProc = p; senderProc = nil; log("core \(arg) started pid \(p.processIdentifier)") }
-        catch { log("core start failed: \(error)") }
+        do { try p.run(); coreProc = p; senderProc = nil; log("core \(arg) started pid \(p.processIdentifier)"); return true }
+        catch { log("core start failed: \(error)"); return false }
     }
 
-    func startSender() {
+    @discardableResult func startSender() -> Bool {
+        if senderProc?.isRunning == true { return true }
+        senderProc = nil
+        guard killAllAndWait("sync-sender") else {
+            log("sender start aborted: old sync-sender still running")
+            return false
+        }
         let target = senderTarget()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: senderPath)
@@ -835,15 +913,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.updateUI(.senderExited)
             }
         }
-        do { try p.run(); senderProc = p; coreProc = nil; log("sender -> \(target) pid \(p.processIdentifier)") }
-        catch { log("sender start failed: \(error)") }
+        do { try p.run(); senderProc = p; coreProc = nil; log("sender -> \(target) pid \(p.processIdentifier)"); return true }
+        catch { log("sender start failed: \(error)"); return false }
     }
 
-    func startReceiver() {
+    @discardableResult func startReceiver() -> Bool {
         guard FileManager.default.fileExists(atPath: receiverPath) else {
-            log("receiver missing at \(receiverPath), skipping"); return
+            log("receiver missing at \(receiverPath), skipping"); return false
         }
-        if receiverProc?.isRunning == true { return }
+        if receiverProc?.isRunning == true { return true }
+        receiverProc = nil
+        guard killAllAndWait("sync-receiver") else {
+            log("receiver start aborted: old sync-receiver still running")
+            return false
+        }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: receiverPath)
         p.arguments = []
@@ -851,8 +934,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         p.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async { self?.receiverProc = nil; self?.updateUI(.receiverRestarting) }
         }
-        do { try p.run(); receiverProc = p; log("receiver started pid \(p.processIdentifier)") }
-        catch { log("receiver start failed: \(error)") }
+        do { try p.run(); receiverProc = p; log("receiver started pid \(p.processIdentifier)"); return true }
+        catch { log("receiver start failed: \(error)"); return false }
     }
 
     func watchdog() {

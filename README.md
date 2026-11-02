@@ -283,6 +283,20 @@ menu can switch language without restarting.
   file to the opposite name: 550xe trusted-clients →
   trusted-servers, c8dh trusted-servers → trusted-clients; same two
   machines and certificates, just trusted in both directions).
+- **v2.2.2 (2026-11-01, current)**: Fixes the "already running" loop
+  found 23:03–23:04 the same night. A deskflow-core (or sync-receiver /
+  sync-sender) that outlived the SyncBar instance that started it holds
+  its lock / port, but the new SyncBar instance has no Process for it,
+  so it launches a duplicate that exits immediately ("an instance of
+  deskflow core is already running", "bind: Address already in use"),
+  the termination handler sets the menu to Stopped, and the next click
+  repeats the loop while the original child is actually still running.
+  Every start now kills ALL processes of that name first and waits
+  until none remain (SIGTERM, then SIGKILL after a timeout) before
+  launching a fresh, tracked child; starting a duplicate while the old
+  one is still shutting down was the other half of the same bug. Start
+  functions now return success, so a failed start shows "core exited"
+  instead of a false "running" status.
 
 ## Troubleshooting
 
