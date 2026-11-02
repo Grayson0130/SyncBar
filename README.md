@@ -222,6 +222,21 @@ the default `192.168.66.11`. Change that file (or the default in
 | Both machines on Broadcast at once | No echo loop (session-tap guard). |
 | SyncBar-launched children without a SyncBar Accessibility grant | Both sender and Deskflow core fail their tap check (`CGEventTapCreate` failed / `process is not trusted anymore`) and exit; SyncBar falls back to Stopped. Fixed by manually granting SyncBar (no prompt appears for its children). |
 
+## Languages
+
+SyncBar v2.1 and later support six languages: Chinese, English,
+Japanese, French, German and Spanish. Strings live in code
+(`SyncBar/main.swift`, `STR` table), not in `.lproj` bundles, so the
+menu can switch language without restarting.
+
+- Default is **Follow System**: the OS preferred language is used if it
+  is one of the six, otherwise English.
+- Or pick a language explicitly from the menu: `语言 / Language` →
+  `中文 / English / 日本語 / Français / Deutsch / Español`.
+  The choice is saved and restored on launch.
+- Language names in the menu are always shown in their own language,
+  so the menu is usable even before you understand the current one.
+
 ## Version history
 
 - **v1 (2026-11-01)**: Menu-bar app on 550xe only. Two modes, sender
@@ -229,11 +244,15 @@ the default `192.168.66.11`. Change that file (or the default in
   Ctrl+Shift+F12 Deskflow hotkey idea was abandoned in favour of the
   menu). Stopping broadcast meant Ctrl+C in a terminal or killing the
   sender.
-- **v2 (2026-11-01, current)**: Dual-ended. SyncBar, sender and receiver
+- **v2 (2026-11-01)**: Dual-ended. SyncBar, sender and receiver
   on both machines; receiver always on; Edge mode read from
   `Deskflow.conf` (server/client per machine); broadcast target per
   machine; receiver posts to the session tap (loop guard); menu shows
   role, peer IP and receiver status.
+- **v2.1 (2026-11-01, current)**: Multilingual UI. Chinese, English,
+  Japanese, French, German and Spanish, with a Follow System option and
+  a Language submenu in the menu bar. No functional change to Edge or
+  Broadcast behaviour.
 
 ## Troubleshooting
 
