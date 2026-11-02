@@ -1,4 +1,32 @@
-// SyncBar v2.2.2: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
+// SyncBar v2.3: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
+// v2.3 adds Bonjour discovery (user choice 2026-11-01: auto-update a known
+// peer's IP and reconnect):
+//  - Each SyncBar publishes _syncbar._tcp (name = this machine's Deskflow
+//    computer name, port = the always-on broadcast receiver port 42421,
+//    TXT: name = Deskflow computer name, role = server/client, ver).
+//    It also browses for _syncbar._tcp on the LAN.
+//  - Discovered peers appear in two places: a popup in the "Set Peer
+//    Device..." dialog (picking one fills name + address), and a
+//    "Discovered Devices" menu submenu (picking one saves it as the peer
+//    and restarts the active child, same as a manual peer edit).
+//  - Auto-update: when a resolved peer's TXT name matches the already
+//    configured peer name, and the configured address is a bare IPv4
+//    that differs from the peer's resolved IPv4, SyncBar updates the
+//    address, saves devices.json, and restarts the active child (edge
+//    client or broadcast sender) so it reconnects to the new address.
+//    A hostname address (.local) is never overwritten: mDNS already
+//    resolves it to the current IP, so there is nothing to fix.
+//  - Safety: discovery never adopts an unknown device. Auto-update only
+//    ever applies to the peer name the user already configured; a new
+//    name in the discovered list requires a manual pick. Bonjour TXT
+//    records are unauthenticated, so on a shared LAN a spoofed name
+//    could in principle redirect the known peer's address — this is the
+//    same trust level as .local DNS on a home LAN, and it is the
+//    behaviour the user explicitly chose for v2.3.
+//  - Own service is filtered out by service name and by TXT name.
+//  - Info.plist declares NSBonjourServices (_syncbar._tcp) and a local
+//    network usage description, in case macOS prompts for local network
+//    access on first publish/browse.
 // v2.2.2 fixes the "already running" loop found 2026-11-01 23:03-23:04:
 //  - A deskflow-core (or sync-receiver / sync-sender) that outlived the
 //    SyncBar instance that started it holds its lock / port, but the new
@@ -135,6 +163,10 @@ let STR: [String: [Lang: String]] = [
     "followSystem": [.zh: "跟随系统", .en: "Follow System", .ja: "システムに従う", .fr: "Suivre le système", .de: "System folgen", .es: "Seguir el sistema"],
     "tooltip": [.zh: "SyncBar：边缘切换 / 广播同步 二选一", .en: "SyncBar: Edge or Broadcast, one at a time", .ja: "SyncBar：エッジ切り替え / ブロードキャスト同期のどちらか一方", .fr: "SyncBar : bord ou diffusion, l'un ou l'autre", .de: "SyncBar: Kantenwechsel oder Broadcast, jeweils nur eines", .es: "SyncBar: borde o difusión, solo uno a la vez"],
     "peerSettings": [.zh: "设置对端设备…", .en: "Set Peer Device…", .ja: "対向デバイスを設定…", .fr: "Configurer l'appareil pair…", .de: "Peer-Gerät einstellen…", .es: "Configurar dispositivo par…"],
+    "discoveredMenu": [.zh: "发现的设备 (Bonjour)", .en: "Discovered Devices (Bonjour)", .ja: "検出されたデバイス (Bonjour)", .fr: "Appareils détectés (Bonjour)", .de: "Gefundene Geräte (Bonjour)", .es: "Dispositivos detectados (Bonjour)"],
+    "noDevices": [.zh: "未发现设备", .en: "No devices found", .ja: "デバイスが見つかりません", .fr: "Aucun appareil trouvé", .de: "Keine Geräte gefunden", .es: "No se encontraron dispositivos"],
+    "discoveredPopup": [.zh: "发现的设备…", .en: "Discovered devices…", .ja: "検出されたデバイス…", .fr: "Appareils détectés…", .de: "Gefundene Geräte…", .es: "Dispositivos detectados…"],
+    "bonjourAutoUpdated": [.zh: "对端地址已自动更新", .en: "Peer address auto-updated", .ja: "対向デバイスのアドレスを自動更新しました", .fr: "Adresse du pair mise à jour automatiquement", .de: "Peer-Adresse automatisch aktualisiert", .es: "Dirección del par actualizada automáticamente"],
     "roleMenu": [.zh: "本机角色", .en: "This Machine's Role", .ja: "自機の役割", .fr: "Rôle de cette machine", .de: "Rolle dieses Geräts", .es: "Rol de este equipo"],
     "roleServerItem": [.zh: "服务端", .en: "Server", .ja: "サーバー", .fr: "Serveur", .de: "Server", .es: "Servidor"],
     "roleClientItem": [.zh: "客户端", .en: "Client", .ja: "クライアント", .fr: "Client", .de: "Client", .es: "Cliente"],
@@ -545,14 +577,65 @@ func senderTarget() -> String {
     return devices.peerAddress
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+// --- Bonjour discovery (v2.3) ---
+let bonjourType = "_syncbar._tcp."
+let bonjourVersion = "2.3"
+
+struct DiscoveredPeer {
+    var name: String
+    var address: String
+    var hostname: String
+    var role: String
+    var version: String
+}
+
+// First IPv4 address from a resolved NetService, or "" if none.
+func ipv4FromService(_ service: NetService) -> String {
+    guard let addrs = service.addresses else { return "" }
+    for data in addrs {
+        let addr = data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> String? in
+            guard let base = ptr.baseAddress else { return nil }
+            let sa = base.assumingMemoryBound(to: sockaddr.self).pointee
+            guard sa.sa_family == sa_family_t(AF_INET) else { return nil }
+            let sin = base.assumingMemoryBound(to: sockaddr_in.self).pointee
+            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            var inAddr = sin.sin_addr
+            guard inet_ntop(AF_INET, &inAddr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { return nil }
+            return String(cString: buf)
+        }
+        if let ip = addr, !ip.isEmpty { return ip }
+    }
+    return ""
+}
+
+func txtDict(_ service: NetService) -> [String: String] {
+    guard let data = service.txtRecordData() else { return [:] }
+    let dict = NetService.dictionary(fromTXTRecord: data)
+    var out: [String: String] = [:]
+    for (k, v) in dict { out[k] = String(data: v, encoding: .utf8) ?? "" }
+    return out
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate, NetServiceDelegate, NetServiceBrowserDelegate {
     var statusItem: NSStatusItem!
     var edgeItem: NSMenuItem!
     var broadcastItem: NSMenuItem!
     var statusTextItem: NSMenuItem!
     var receiverItem: NSMenuItem!
     var peerSettingsItem: NSMenuItem!
+    var discoveredMenuItem: NSMenuItem!
+    var discoveredSubmenu: NSMenu!
     var roleMenuItem: NSMenuItem!
+    // Bonjour (v2.3)
+    var bonjourBrowser: NetServiceBrowser?
+    var bonjourPublisher: NetService?
+    var resolvingServices: [NetService] = []
+    var discoveredPeers: [String: DiscoveredPeer] = [:]
+    var dialogNameField: NSTextField?
+    var dialogAddrField: NSTextField?
+    var dialogPopup: NSPopUpButton?
+    var dialogPeers: [DiscoveredPeer] = []
+    var dialogOpen = false
     var roleServerItem: NSMenuItem!
     var roleClientItem: NSMenuItem!
     var languageMenuItem: NSMenuItem!
@@ -582,6 +665,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         receiverItem.isEnabled = false
         peerSettingsItem = NSMenuItem(title: "", action: #selector(openPeerDialog), keyEquivalent: "")
         peerSettingsItem.target = self
+        discoveredMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        discoveredSubmenu = NSMenu()
+        discoveredMenuItem.submenu = discoveredSubmenu
+        updateDiscoveredMenu()
         roleServerItem = NSMenuItem(title: "", action: #selector(toRoleServer), keyEquivalent: "")
         roleClientItem = NSMenuItem(title: "", action: #selector(toRoleClient), keyEquivalent: "")
         roleServerItem.target = self; roleClientItem.target = self
@@ -611,7 +698,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(statusTextItem); menu.addItem(receiverItem)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(peerSettingsItem); menu.addItem(roleMenuItem)
+        menu.addItem(peerSettingsItem); menu.addItem(discoveredMenuItem); menu.addItem(roleMenuItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(languageMenuItem)
         menu.addItem(NSMenuItem.separator())
@@ -625,6 +712,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == "org.deskflow.deskflow" {
                 app.terminate()
             }
+            self.startBonjour()
             DispatchQueue.global(qos: .userInitiated).async { [self] in
                 Thread.sleep(forTimeInterval: 1.0)
                 runAndWait("/usr/bin/pkill", ["-x", "deskflow-core"])
@@ -676,6 +764,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             statusTextItem.title = tr("statusPrefix") + tr(status.key) + " · " + tr("localPrefix") + role + " · " + tr("peerPrefix") + peerText
             receiverItem.title = (receiverProc?.isRunning == true) ? tr("receiverRunning") : tr("receiverStopped")
             peerSettingsItem.title = tr("peerSettings")
+            discoveredMenuItem.title = tr("discoveredMenu")
             roleMenuItem.title = tr("roleMenu")
             roleServerItem.title = tr("roleServerItem")
             roleClientItem.title = tr("roleClientItem")
@@ -691,13 +780,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func discoveredPopupSelected(_ sender: NSPopUpButton) {
+        let idx = sender.indexOfSelectedItem
+        guard idx > 0, idx - 1 < dialogPeers.count else {
+            sender.selectItem(at: 0)
+            return
+        }
+        let peer = dialogPeers[idx - 1]
+        dialogNameField?.stringValue = peer.name
+        dialogAddrField?.stringValue = peer.address
+        sender.selectItem(at: 0)
+    }
+
     @objc func openPeerDialog() {
         let alert = NSAlert()
         alert.messageText = tr("peerDialogTitle")
         alert.informativeText = tr("peerDialogInfo")
         alert.addButton(withTitle: tr("saveButton"))
         alert.addButton(withTitle: tr("cancelButton"))
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 64))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 96))
+        // v2.3: Bonjour discovered devices popup. Picking one fills the
+        // name and address fields below; manual editing still works.
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 68, width: 320, height: 26), pullsDown: false)
+        popup.addItem(withTitle: tr("discoveredPopup"))
+        dialogPeers = discoveredPeers.values.sorted { $0.name < $1.name }
+        for peer in dialogPeers {
+            popup.addItem(withTitle: "\(peer.name) (\(peer.address))")
+        }
+        popup.target = self
+        popup.action = #selector(discoveredPopupSelected(_:))
+        dialogPopup = popup
         let nameLabel = NSTextField(labelWithString: tr("peerNameLabel"))
         nameLabel.frame = NSRect(x: 0, y: 38, width: 90, height: 20)
         let nameField = NSTextField(frame: NSRect(x: 95, y: 36, width: 225, height: 24))
@@ -706,12 +818,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         addrLabel.frame = NSRect(x: 0, y: 6, width: 90, height: 20)
         let addrField = NSTextField(frame: NSRect(x: 95, y: 4, width: 225, height: 24))
         addrField.stringValue = devices.peerAddress
+        dialogNameField = nameField
+        dialogAddrField = addrField
+        view.addSubview(popup)
         view.addSubview(nameLabel); view.addSubview(nameField)
         view.addSubview(addrLabel); view.addSubview(addrField)
         alert.accessoryView = view
         // Focus the address field, the one users change most often.
         alert.window.initialFirstResponder = addrField
+        dialogOpen = true
         let response = alert.runModal()
+        dialogOpen = false
+        dialogNameField = nil; dialogAddrField = nil; dialogPopup = nil
         guard response == .alertFirstButtonReturn else { return }
         let addr = addrField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !addr.isEmpty else { return }
@@ -791,6 +909,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         devices.isServer = toServer
         roleIsServer = toServer
         saveDevices()
+        updateBonjourTXT()
         updateUI(.switching)
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == "org.deskflow.deskflow" {
@@ -936,6 +1055,138 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do { try p.run(); receiverProc = p; log("receiver started pid \(p.processIdentifier)"); return true }
         catch { log("receiver start failed: \(error)"); return false }
+    }
+
+    // --- Bonjour (v2.3) ---
+    func startBonjour() {
+        publishBonjour()
+        let browser = NetServiceBrowser()
+        browser.delegate = self
+        bonjourBrowser = browser
+        browser.searchForServices(ofType: bonjourType, inDomain: "")
+        log("bonjour browse started for \(bonjourType)")
+    }
+
+    func bonjourTXT() -> Data {
+        let dict: [String: Data] = [
+            "name": localComputerName().data(using: .utf8) ?? Data(),
+            "role": (devices.isServer ? "server" : "client").data(using: .utf8) ?? Data(),
+            "ver": bonjourVersion.data(using: .utf8) ?? Data(),
+        ]
+        return NetService.data(fromTXTRecord: dict)
+    }
+
+    func publishBonjour() {
+        bonjourPublisher?.stop()
+        let service = NetService(domain: "", type: bonjourType, name: localComputerName(), port: 42421)
+        service.delegate = self
+        _ = service.setTXTRecord(bonjourTXT())
+        bonjourPublisher = service
+        service.publish()
+        log("bonjour publish started: \(localComputerName())")
+    }
+
+    func updateBonjourTXT() {
+        _ = bonjourPublisher?.setTXTRecord(bonjourTXT())
+    }
+
+    func updateDiscoveredMenu() {
+        DispatchQueue.main.async { [self] in
+            discoveredSubmenu.removeAllItems()
+            let peers = discoveredPeers.values.sorted { $0.name < $1.name }
+            if peers.isEmpty {
+                let item = NSMenuItem(title: tr("noDevices"), action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                discoveredSubmenu.addItem(item)
+            } else {
+                for peer in peers {
+                    let item = NSMenuItem(title: "\(peer.name) (\(peer.address))", action: #selector(selectDiscoveredPeer(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = peer.name
+                    discoveredSubmenu.addItem(item)
+                }
+            }
+            discoveredMenuItem.title = tr("discoveredMenu")
+        }
+    }
+
+    @objc func selectDiscoveredPeer(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              let peer = discoveredPeers[name] else { return }
+        devices.peerName = peer.name
+        devices.peerAddress = peer.address.isEmpty ? peer.hostname : peer.address
+        saveDevices()
+        log("discovered peer selected: \(peer.name) @ \(devices.peerAddress)")
+        applyPeerChange()
+    }
+
+    // NetServiceBrowserDelegate
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        if service.name == localComputerName() { return }
+        service.delegate = self
+        resolvingServices.append(service)
+        service.resolve(withTimeout: 5.0)
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
+        if let name = discoveredPeers.first(where: { $0.value.hostname == service.hostName || $0.key == service.name })?.key {
+            discoveredPeers.removeValue(forKey: name)
+            updateDiscoveredMenu()
+        }
+        resolvingServices.removeAll { $0 === service }
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+        log("bonjour browse failed: \(errorDict)")
+    }
+
+    // NetServiceDelegate
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        resolvingServices.removeAll { $0 === sender }
+        let txt = txtDict(sender)
+        let name = txt["name"] ?? sender.name
+        if name == localComputerName() { return }
+        let hostname = sender.hostName?.trimmingCharacters(in: CharacterSet(charactersIn: ".")) ?? ""
+        let ip = ipv4FromService(sender)
+        let peer = DiscoveredPeer(
+            name: name,
+            address: ip.isEmpty ? hostname : ip,
+            hostname: hostname,
+            role: txt["role"] ?? "",
+            version: txt["ver"] ?? ""
+        )
+        discoveredPeers[name] = peer
+        updateDiscoveredMenu()
+        log("bonjour discovered: \(name) @ \(peer.address) role=\(peer.role) ver=\(peer.version)")
+        // Auto-update a known peer's bare-IPv4 address (v2.3 user choice).
+        // Never adopt a new name, never overwrite a hostname address, and
+        // never run while the user is editing the peer dialog or a switch
+        // is already in progress.
+        if name == devices.peerName, isIPv4(devices.peerAddress), !ip.isEmpty,
+           ip != devices.peerAddress, !dialogOpen, !switching {
+            let old = devices.peerAddress
+            devices.peerAddress = ip
+            saveDevices()
+            log("bonjour auto-updated peer \(name): \(old) -> \(ip)")
+            if mode != .stopped {
+                applyPeerChange()
+            } else {
+                updateUI(.stopped)
+            }
+        }
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        resolvingServices.removeAll { $0 === sender }
+        log("bonjour resolve failed for \(sender.name): \(errorDict)")
+    }
+
+    func netServiceDidPublish(_ sender: NetService) {
+        log("bonjour published: \(sender.name)")
+    }
+
+    func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+        log("bonjour publish failed: \(errorDict)")
     }
 
     func watchdog() {

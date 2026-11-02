@@ -8,15 +8,21 @@
 	<string>com.grayson.SyncBar</string>
 	<key>CFBundleName</key>
 	<string>SyncBar</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.3</string>
 	<key>CFBundleVersion</key>
 	<string>2.2.2</string>
-	<key>CFBundleShortVersionString</key>
-	<string>2.2.2</string>
-	<key>LSUIElement</key>
-	<true/>
-	<key>NSHighResolutionCapable</key>
-	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_syncbar._tcp</string>
+	</array>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SyncBar discovers peer devices on your local network via Bonjour.</string>
 </dict>
 </plist>

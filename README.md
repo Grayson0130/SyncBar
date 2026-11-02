@@ -297,6 +297,22 @@ menu can switch language without restarting.
   one is still shutting down was the other half of the same bug. Start
   functions now return success, so a failed start shows "core exited"
   instead of a false "running" status.
+- **v2.3 (2026-11-01, current)**: Bonjour discovery. Each SyncBar
+  publishes `_syncbar._tcp` (name = this machine's Deskflow computer
+  name, port 42421, TXT: name, role, ver) and browses for the same
+  service on the LAN. Discovered peers appear in the peer dialog popup
+  (picking one fills name + address) and in a "Discovered Devices
+  (Bonjour)" menu submenu (picking one saves it as the peer and
+  restarts the active child). Auto-update, as chosen by the user: when
+  a resolved peer's TXT name matches the already configured peer name
+  and the configured address is a bare IPv4 that differs from the
+  resolved IPv4, SyncBar updates the address, saves devices.json, and
+  restarts the active child to reconnect. A `.local` hostname address
+  is never overwritten, an unknown name is never adopted automatically,
+  and no auto-update runs while the peer dialog is open or a switch is
+  in progress. Bonjour TXT records are unauthenticated, so this is
+  home-LAN trust level, same as `.local` DNS. Info.plist declares
+  NSBonjourServices and a local network usage description.
 
 ## Troubleshooting
 
