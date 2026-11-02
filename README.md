@@ -313,6 +313,21 @@ menu can switch language without restarting.
   in progress. Bonjour TXT records are unauthenticated, so this is
   home-LAN trust level, same as `.local` DNS. Info.plist declares
   NSBonjourServices and a local network usage description.
+- **v2.4 (2026-11-01, current)**: Customizable edge relative position,
+  previously fixed to down. Each machine stores in devices.json which
+  side its peer is on from THIS machine's perspective (down / up /
+  left / right), chosen from a "Peer Position" menu submenu. The server
+  generates links from its own direction (local <dir> = peer, peer
+  <opposite> = local). Migration preserves the old layout: a server
+  migrates to "down", a client to "up". Direction is per-machine, so
+  for a role switch to keep the same physical edges, set the direction
+  on both machines from each machine's own perspective. Changing the
+  direction rewrites the configs and restarts the active child, same
+  path as a peer edit. Live proof of v2.3 auto-update during the v2.4
+  rollout: 550xe's peer address had drifted to 192.168.66.13 while
+  c8dh was actually on 192.168.66.11, and on c8dh's 2.4 launch the
+  Bonjour resolve auto-corrected 550xe back to .11 and saved the
+  migrated direction.
 
 ## Troubleshooting
 

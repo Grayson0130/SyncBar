@@ -1,4 +1,21 @@
-// SyncBar v2.3: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
+// SyncBar v2.4: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
+// v2.4 adds a customizable edge relative position (previously fixed down):
+//  - Each machine stores, in devices.json, which side its peer is on from
+//    THIS machine's perspective: "down", "up", "left" or "right". The
+//    server generates links from its own direction: local <dir> = peer,
+//    peer <opposite(dir)> = local. So "peer below me" on 550xe (server)
+//    gives the old behaviour (550xe down = c8dh, c8dh up = 550xe), and
+//    "peer to my right" gives 550xe right = c8dh, c8dh left = 550xe.
+//  - Direction is per-machine, not per-pair: when roles switch, the new
+//    server uses ITS stored direction. For a role switch to keep the
+//    same physical edges, set the direction on both machines from each
+//    machine's own perspective (e.g. 550xe: peer below, c8dh: peer
+//    above — which is exactly the migration default: a server migrates
+//    to "down", a client to "up", preserving the pre-v2.4 layout).
+//  - Changing the direction while Edge is active restarts the core
+//    (server: new links; client: harmless reconnect); changing it in
+//    any other mode only saves the setting and rewrites the configs,
+//    so the next Edge start uses the new links.
 // v2.3 adds Bonjour discovery (user choice 2026-11-01: auto-update a known
 // peer's IP and reconnect):
 //  - Each SyncBar publishes _syncbar._tcp (name = this machine's Deskflow
@@ -164,6 +181,11 @@ let STR: [String: [Lang: String]] = [
     "tooltip": [.zh: "SyncBar：边缘切换 / 广播同步 二选一", .en: "SyncBar: Edge or Broadcast, one at a time", .ja: "SyncBar：エッジ切り替え / ブロードキャスト同期のどちらか一方", .fr: "SyncBar : bord ou diffusion, l'un ou l'autre", .de: "SyncBar: Kantenwechsel oder Broadcast, jeweils nur eines", .es: "SyncBar: borde o difusión, solo uno a la vez"],
     "peerSettings": [.zh: "设置对端设备…", .en: "Set Peer Device…", .ja: "対向デバイスを設定…", .fr: "Configurer l'appareil pair…", .de: "Peer-Gerät einstellen…", .es: "Configurar dispositivo par…"],
     "discoveredMenu": [.zh: "发现的设备 (Bonjour)", .en: "Discovered Devices (Bonjour)", .ja: "検出されたデバイス (Bonjour)", .fr: "Appareils détectés (Bonjour)", .de: "Gefundene Geräte (Bonjour)", .es: "Dispositivos detectados (Bonjour)"],
+    "positionMenu": [.zh: "对端位置", .en: "Peer Position", .ja: "対向デバイスの位置", .fr: "Position du pair", .de: "Peer-Position", .es: "Posición del par"],
+    "positionBelow": [.zh: "对端在下方", .en: "Peer Below", .ja: "対向デバイスは下", .fr: "Pair en dessous", .de: "Peer unten", .es: "Par debajo"],
+    "positionAbove": [.zh: "对端在上方", .en: "Peer Above", .ja: "対向デバイスは上", .fr: "Pair au-dessus", .de: "Peer oben", .es: "Par encima"],
+    "positionLeft": [.zh: "对端在左侧", .en: "Peer on the Left", .ja: "対向デバイスは左", .fr: "Pair à gauche", .de: "Peer links", .es: "Par a la izquierda"],
+    "positionRight": [.zh: "对端在右侧", .en: "Peer on the Right", .ja: "対向デバイスは右", .fr: "Pair à droite", .de: "Peer rechts", .es: "Par a la derecha"],
     "noDevices": [.zh: "未发现设备", .en: "No devices found", .ja: "デバイスが見つかりません", .fr: "Aucun appareil trouvé", .de: "Keine Geräte gefunden", .es: "No se encontraron dispositivos"],
     "discoveredPopup": [.zh: "发现的设备…", .en: "Discovered devices…", .ja: "検出されたデバイス…", .fr: "Appareils détectés…", .de: "Gefundene Geräte…", .es: "Dispositivos detectados…"],
     "bonjourAutoUpdated": [.zh: "对端地址已自动更新", .en: "Peer address auto-updated", .ja: "対向デバイスのアドレスを自動更新しました", .fr: "Adresse du pair mise à jour automatiquement", .de: "Peer-Adresse automatisch aktualisiert", .es: "Dirección del par actualizada automáticamente"],
@@ -348,19 +370,33 @@ func serverLinksPeerName(local: String) -> String? {
     return names.first { $0 != local }
 }
 
-// --- Device store (v2.2, 2 devices only) ---
+// --- Device store (v2.2, 2 devices only; v2.4 adds peerDirection) ---
+func oppositeDirection(_ dir: String) -> String {
+    switch dir {
+    case "up": return "down"
+    case "left": return "right"
+    case "right": return "left"
+    default: return "up"
+    }
+}
+
+func validDirection(_ dir: String) -> String {
+    return ["down", "up", "left", "right"].contains(dir) ? dir : "down"
+}
+
 struct Devices {
     var peerName: String
     var peerAddress: String
     var isServer: Bool
+    var peerDirection: String
 }
 
-var devices = Devices(peerName: "", peerAddress: "192.168.66.11", isServer: true)
+var devices = Devices(peerName: "", peerAddress: "192.168.66.11", isServer: true, peerDirection: "down")
 
 func saveDevices() {
     do {
         try FileManager.default.createDirectory(atPath: appSupportDir, withIntermediateDirectories: true)
-        let obj: [String: Any] = ["version": 1, "peerName": devices.peerName, "peerAddress": devices.peerAddress, "isServer": devices.isServer]
+        let obj: [String: Any] = ["version": 1, "peerName": devices.peerName, "peerAddress": devices.peerAddress, "isServer": devices.isServer, "peerDirection": devices.peerDirection]
         let data = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: devicesFile), options: [.atomic])
     } catch { log("save devices failed: \(error)") }
@@ -373,8 +409,12 @@ func loadDevices() {
        let addr = obj["peerAddress"] as? String,
        let server = obj["isServer"] as? Bool,
        !addr.isEmpty {
-        devices = Devices(peerName: name.isEmpty ? addr : name, peerAddress: addr, isServer: server)
-        log("devices loaded: peer \(devices.peerName) @ \(devices.peerAddress), isServer=\(server)")
+        // v2.4: peerDirection may be missing in pre-v2.4 files. Default
+        // preserves the old fixed layout: server peer below, client
+        // peer above (so a role switch keeps the same physical edges).
+        let dir = (obj["peerDirection"] as? String).map(validDirection) ?? (server ? "down" : "up")
+        devices = Devices(peerName: name.isEmpty ? addr : name, peerAddress: addr, isServer: server, peerDirection: dir)
+        log("devices loaded: peer \(devices.peerName) @ \(devices.peerAddress), isServer=\(server), direction=\(dir)")
         return
     }
     // First v2.2 launch: migrate from the old setup, then save.
@@ -394,9 +434,9 @@ func loadDevices() {
         addr = host.isEmpty ? "192.168.66.10" : host
         name = addr
     }
-    devices = Devices(peerName: name, peerAddress: addr, isServer: server)
+    devices = Devices(peerName: name, peerAddress: addr, isServer: server, peerDirection: server ? "down" : "up")
     saveDevices()
-    log("devices migrated: peer \(name) @ \(addr), isServer=\(server)")
+    log("devices migrated: peer \(name) @ \(addr), isServer=\(server), direction=\(devices.peerDirection)")
 }
 
 func isIPv4(_ s: String) -> Bool {
@@ -535,7 +575,8 @@ func writeDeskflowConf(isServer: Bool, peerAddress: String) -> Bool {
 }
 
 // --- Server links writer (preserves [options] if present) ---
-func writeServerConf(local: String, peer: String) -> Bool {
+// v2.4: links come from the server's stored direction to its peer.
+func writeServerConf(local: String, peer: String, direction: String = "down") -> Bool {
     var optionsLines: [String] = []
     if let text = try? String(contentsOfFile: serverConf, encoding: .utf8) {
         var inOptions = false
@@ -548,11 +589,12 @@ func writeServerConf(local: String, peer: String) -> Bool {
             }
         }
     }
+    let dir = validDirection(direction)
     var out = "section: links\n"
     out += "\t\(local):\n"
-    out += "\t\tdown = \(peer)\n"
+    out += "\t\t\(dir) = \(peer)\n"
     out += "\t\(peer):\n"
-    out += "\t\tup = \(local)\n"
+    out += "\t\t\(oppositeDirection(dir)) = \(local)\n"
     out += "end\n\n"
     out += "section: options\n"
     for l in optionsLines { out += l + "\n" }
@@ -567,9 +609,9 @@ func applyDevicesToDeskflow() -> Bool {
     let okConf = writeDeskflowConf(isServer: devices.isServer, peerAddress: devices.peerAddress)
     var okServer = true
     if devices.isServer {
-        okServer = writeServerConf(local: localComputerName(), peer: devices.peerName)
+        okServer = writeServerConf(local: localComputerName(), peer: devices.peerName, direction: devices.peerDirection)
     }
-    log("apply devices: conf=\(okConf) server=\(okServer) peer=\(devices.peerName)@\(devices.peerAddress) isServer=\(devices.isServer)")
+    log("apply devices: conf=\(okConf) server=\(okServer) peer=\(devices.peerName)@\(devices.peerAddress) isServer=\(devices.isServer) direction=\(devices.peerDirection)")
     return okConf && okServer
 }
 
@@ -626,6 +668,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NetServiceDelegate, NetServi
     var discoveredMenuItem: NSMenuItem!
     var discoveredSubmenu: NSMenu!
     var roleMenuItem: NSMenuItem!
+    var positionMenuItem: NSMenuItem!
+    var positionItems: [String: NSMenuItem] = [:]
     // Bonjour (v2.3)
     var bonjourBrowser: NetServiceBrowser?
     var bonjourPublisher: NetService?
@@ -676,6 +720,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NetServiceDelegate, NetServi
         let roleMenu = NSMenu()
         roleMenu.addItem(roleServerItem); roleMenu.addItem(roleClientItem)
         roleMenuItem.submenu = roleMenu
+        positionMenuItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        let positionMenu = NSMenu()
+        for dir in ["down", "up", "left", "right"] {
+            let item = NSMenuItem(title: "", action: #selector(setPeerPosition(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = dir
+            positionItems[dir] = item
+            positionMenu.addItem(item)
+        }
+        positionMenuItem.submenu = positionMenu
         quitItem = NSMenuItem(title: "", action: #selector(quitApp), keyEquivalent: "q")
         edgeItem.target = self; broadcastItem.target = self; quitItem.target = self
 
@@ -698,7 +751,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NetServiceDelegate, NetServi
         menu.addItem(NSMenuItem.separator())
         menu.addItem(statusTextItem); menu.addItem(receiverItem)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(peerSettingsItem); menu.addItem(discoveredMenuItem); menu.addItem(roleMenuItem)
+        menu.addItem(peerSettingsItem); menu.addItem(discoveredMenuItem); menu.addItem(roleMenuItem); menu.addItem(positionMenuItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(languageMenuItem)
         menu.addItem(NSMenuItem.separator())
@@ -735,6 +788,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NetServiceDelegate, NetServi
     }
     @objc func toRoleServer() { switchRole(toServer: true) }
     @objc func toRoleClient() { switchRole(toServer: false) }
+    @objc func setPeerPosition(_ sender: NSMenuItem) {
+        guard let dir = sender.representedObject as? String else { return }
+        let direction = validDirection(dir)
+        if direction == devices.peerDirection { return }
+        devices.peerDirection = direction
+        saveDevices()
+        log("peer position changed: peer is \(direction) of this machine")
+        updateUI(currentStatus)
+        // Rewrites configs (server links when this machine is the server)
+        // and restarts the active child, same path as a peer edit.
+        applyPeerChange()
+    }
     @objc func quitApp() {
         quitting = true
         stopAll()
@@ -770,6 +835,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NetServiceDelegate, NetServi
             roleClientItem.title = tr("roleClientItem")
             roleServerItem.state = roleIsServer ? .on : .off
             roleClientItem.state = roleIsServer ? .off : .on
+            positionMenuItem.title = tr("positionMenu")
+            let positionTitles: [String: String] = [
+                "down": tr("positionBelow"),
+                "up": tr("positionAbove"),
+                "left": tr("positionLeft"),
+                "right": tr("positionRight"),
+            ]
+            for (dir, item) in positionItems {
+                item.title = positionTitles[dir] ?? dir
+                item.state = (dir == devices.peerDirection) ? .on : .off
+            }
             languageMenuItem.title = tr("languageMenu")
             let stored = UserDefaults.standard.string(forKey: "SyncBar.language") ?? "system"
             for (code, item) in languageItems {
