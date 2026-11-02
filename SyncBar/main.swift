@@ -1,3 +1,9 @@
+// SyncBar v2.4.1: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
+// v2.4.1 changes NO SyncBar Swift code; it is a sync-helper-only release:
+// sync-helper v2 adds a real Dragged protocol message so broadcast
+// drag-and-drop and Launchpad drag-to-switch-page work (v1 collapsed
+// every drag into a plain move). SyncBar's version is bumped to 2.4.1
+// so the deployed app and the helper it ships can be verified together.
 // SyncBar v2.4: dual-ended menu-bar switch between Deskflow edge mode and sync broadcast.
 // v2.4 adds a customizable edge relative position (previously fixed down):
 //  - Each machine stores, in devices.json, which side its peer is on from

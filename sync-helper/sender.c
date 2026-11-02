@@ -1,4 +1,8 @@
-/* sync-sender: 550xe -> c8dh broadcast helper, v1.
+/* sync-sender: 550xe -> c8dh broadcast helper, v2 (SyncBar v2.4.1).
+ * v2 change: mouse drags are no longer collapsed into plain moves.
+ * Dragged events are sent as MSG_MOUSE_DRAG so the receiver can post
+ * a real Dragged event; v1 sent every move/drag as MSG_MOUSE_MOVE and
+ * drag-and-drop / Launchpad drag-to-switch-page never worked.
  * Captures global key/mouse via CGEventTap, forwards over TCP to
  * sync-receiver on c8dh, and passes every event through locally
  * (returning the event), so the local machine keeps working.
@@ -31,6 +35,10 @@
 #define MSG_SCROLL 6
 #define MSG_FLAGS 7
 #define MSG_HANDSHAKE 8
+#define MSG_MOUSE_DRAG 9
+/* Protocol v2: 1-8 are v1-compatible. 9 is new in v2; an old v1 receiver
+ * drops the connection on an unknown type, so deploy the v2 receiver
+ * on both machines BEFORE deploying the v2 sender. */
 
 static int g_sock = -1;
 static pthread_mutex_t g_sock_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -150,10 +158,7 @@ static CGEventRef tap_callback(CGEventTapProxy proxy, CGEventType type, CGEventR
       put_u64(m+3, (uint64_t)CGEventGetFlags(event));
       send_msg(m, sizeof m); break;
     }
-    case kCGEventMouseMoved:
-    case kCGEventLeftMouseDragged:
-    case kCGEventRightMouseDragged:
-    case kCGEventOtherMouseDragged: {
+    case kCGEventMouseMoved: {
       CGPoint pt = CGEventGetLocation(event);
       g_last_x = pt.x; g_last_y = pt.y;
       uint8_t m[9]; m[0] = MSG_MOUSE_MOVE;
@@ -161,10 +166,30 @@ static CGEventRef tap_callback(CGEventTapProxy proxy, CGEventType type, CGEventR
       put_i32(m+5, (int32_t)(pt.y * g_scale_y));
       send_msg(m, sizeof m); break;
     }
+    case kCGEventLeftMouseDragged:
+    case kCGEventRightMouseDragged:
+    case kCGEventOtherMouseDragged: {
+      CGPoint pt = CGEventGetLocation(event);
+      g_last_x = pt.x; g_last_y = pt.y;
+      uint8_t btn = (type == kCGEventLeftMouseDragged) ? 0 : (type == kCGEventRightMouseDragged) ? 1 : 2;
+      uint8_t m[10]; m[0] = MSG_MOUSE_DRAG; m[1] = btn;
+      put_i32(m+2, (int32_t)(pt.x * g_scale_x));
+      put_i32(m+6, (int32_t)(pt.y * g_scale_y));
+      send_msg(m, sizeof m); break;
+    }
     case kCGEventLeftMouseDown:
     case kCGEventRightMouseDown:
     case kCGEventOtherMouseDown: {
       uint8_t btn = (type == kCGEventLeftMouseDown) ? 0 : (type == kCGEventRightMouseDown) ? 1 : 2;
+      /* Sync the receiver cursor to the exact Down position first:
+       * v1 Down carried no coordinates and relied on the last Move,
+       * which is wrong for a press with no preceding move. */
+      CGPoint pt = CGEventGetLocation(event);
+      g_last_x = pt.x; g_last_y = pt.y;
+      uint8_t mv[9]; mv[0] = MSG_MOUSE_MOVE;
+      put_i32(mv+1, (int32_t)(pt.x * g_scale_x));
+      put_i32(mv+5, (int32_t)(pt.y * g_scale_y));
+      send_msg(mv, sizeof mv);
       uint8_t m[2]; m[0] = MSG_MOUSE_DOWN; m[1] = btn;
       send_msg(m, sizeof m); break;
     }
@@ -172,6 +197,12 @@ static CGEventRef tap_callback(CGEventTapProxy proxy, CGEventType type, CGEventR
     case kCGEventRightMouseUp:
     case kCGEventOtherMouseUp: {
       uint8_t btn = (type == kCGEventLeftMouseUp) ? 0 : (type == kCGEventRightMouseUp) ? 1 : 2;
+      CGPoint pt = CGEventGetLocation(event);
+      g_last_x = pt.x; g_last_y = pt.y;
+      uint8_t mv[9]; mv[0] = MSG_MOUSE_MOVE;
+      put_i32(mv+1, (int32_t)(pt.x * g_scale_x));
+      put_i32(mv+5, (int32_t)(pt.y * g_scale_y));
+      send_msg(mv, sizeof mv);
       uint8_t m[2]; m[0] = MSG_MOUSE_UP; m[1] = btn;
       send_msg(m, sizeof m); break;
     }
@@ -192,7 +223,7 @@ int main(int argc, char **argv) {
   if (argc >= 3) { g_port = atoi(argv[2]); }
   CGRect bounds = CGDisplayBounds(CGMainDisplayID());
   g_screen_w = (int)bounds.size.width; g_screen_h = (int)bounds.size.height;
-  fprintf(stderr, "[sender] local screen %dx%d, receiver %s:%d\n", g_screen_w, g_screen_h, g_host, g_port);
+  fprintf(stderr, "[sender] sync-helper v2, protocol v2, local screen %dx%d, receiver %s:%d\n", g_screen_w, g_screen_h, g_host, g_port);
   fprintf(stderr, "[sender] STOP Deskflow on both machines before using this, or input may double.\n");
   if (!AXIsProcessTrusted()) {
     fprintf(stderr, "[sender] NOTE: not yet trusted for Accessibility. macOS should prompt; if not, add this binary in System Settings > Privacy & Security > Accessibility, then restart it.\n");

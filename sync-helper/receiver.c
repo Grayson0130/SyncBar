@@ -1,4 +1,8 @@
-/* sync-receiver: c8dh side of the broadcast helper, v1.
+/* sync-receiver: c8dh side of the broadcast helper, v2 (SyncBar v2.4.1).
+ * v2 change: drags are posted as real Dragged events, not MouseMoved.
+ * v1 posted every move as kCGEventMouseMoved, so drag-and-drop and
+ * Launchpad drag-to-switch-page never worked: macOS requires a
+ * Dragged event type, not just a held button plus a Moved event.
  * Listens on TCP, injects received key/mouse events via CGEventPost.
  * Posts to kCGSessionEventTap (not HID) on purpose: a HID tap (which
  * sync-sender uses) does not see session-posted events, so if both
@@ -30,10 +34,20 @@
 #define MSG_SCROLL 6
 #define MSG_FLAGS 7
 #define MSG_HANDSHAKE 8
+#define MSG_MOUSE_DRAG 9
+/* Protocol v2: 1-8 are v1-compatible, 9 is new. A v2 receiver still
+ * accepts v1 MOVE messages (see button-state fallback in
+ * post_mouse_move), so a v1 sender keeps working with a v2 receiver
+ * except drags still arrive as moves. A v1 receiver drops a v2
+ * sender on the unknown type 9, so deploy v2 receivers first. */
 
 static CGEventSourceRef g_src = NULL;
 static double g_cur_x = 0, g_cur_y = 0;
 static int g_screen_w = 0, g_screen_h = 0;
+/* Button currently held down on the receiver side, or -1 if none.
+ * Used only as a fallback: a plain MOVE that arrives while a button
+ * is down is re-posted as a Dragged event. */
+static int g_btn_down = -1;
 
 static bool recv_all(int fd, void *buf, size_t len) {
   uint8_t *p = buf;
@@ -74,13 +88,39 @@ static void post_flags(uint16_t code, uint64_t flags) {
   CGEventPost(kCGSessionEventTap, e);
   CFRelease(e);
 }
+static void clamp_xy(int32_t *x, int32_t *y) {
+  if (*x < 0) *x = 0; if (*y < 0) *y = 0;
+  if (g_screen_w > 0 && *x >= g_screen_w) *x = g_screen_w - 1;
+  if (g_screen_h > 0 && *y >= g_screen_h) *y = g_screen_h - 1;
+}
+static CGMouseButton btn_to_cg(uint8_t btn) {
+  return (btn == 1) ? kCGMouseButtonRight : (btn == 2) ? kCGMouseButtonCenter : kCGMouseButtonLeft;
+}
 static void post_mouse_move(int32_t x, int32_t y) {
-  if (x < 0) x = 0; if (y < 0) y = 0;
-  if (g_screen_w > 0 && x >= g_screen_w) x = g_screen_w - 1;
-  if (g_screen_h > 0 && y >= g_screen_h) y = g_screen_h - 1;
+  clamp_xy(&x, &y);
   g_cur_x = x; g_cur_y = y;
   CGPoint pt = CGPointMake(x, y);
-  CGEventRef e = CGEventCreateMouseEvent(g_src, kCGEventMouseMoved, pt, kCGMouseButtonLeft);
+  /* Fallback for v1 senders: a move while a button is down is a drag,
+   * even though v1 labelled it a plain move. */
+  CGEventType t;
+  CGMouseButton b;
+  if (g_btn_down >= 0) {
+    b = btn_to_cg((uint8_t)g_btn_down);
+    t = (g_btn_down == 1) ? kCGEventRightMouseDragged : (g_btn_down == 2) ? kCGEventOtherMouseDragged : kCGEventLeftMouseDragged;
+  } else {
+    b = kCGMouseButtonLeft; t = kCGEventMouseMoved;
+  }
+  CGEventRef e = CGEventCreateMouseEvent(g_src, t, pt, b);
+  if (!e) return;
+  CGEventPost(kCGSessionEventTap, e);
+  CFRelease(e);
+}
+static void post_mouse_drag(uint8_t btn, int32_t x, int32_t y) {
+  clamp_xy(&x, &y);
+  g_cur_x = x; g_cur_y = y;
+  CGPoint pt = CGPointMake(x, y);
+  CGEventType t = (btn == 1) ? kCGEventRightMouseDragged : (btn == 2) ? kCGEventOtherMouseDragged : kCGEventLeftMouseDragged;
+  CGEventRef e = CGEventCreateMouseEvent(g_src, t, pt, btn_to_cg(btn));
   if (!e) return;
   CGEventPost(kCGSessionEventTap, e);
   CFRelease(e);
@@ -90,6 +130,7 @@ static void post_mouse_btn(uint8_t btn, bool down) {
   if (btn == 0) { dt = kCGEventLeftMouseDown; ut = kCGEventLeftMouseUp; b = kCGMouseButtonLeft; }
   else if (btn == 1) { dt = kCGEventRightMouseDown; ut = kCGEventRightMouseUp; b = kCGMouseButtonRight; }
   else { dt = kCGEventOtherMouseDown; ut = kCGEventOtherMouseUp; b = kCGMouseButtonCenter; }
+  if (down) g_btn_down = btn; else if (g_btn_down == (int)btn) g_btn_down = -1;
   CGPoint pt = CGPointMake(g_cur_x, g_cur_y);
   CGEventRef e = CGEventCreateMouseEvent(g_src, down ? dt : ut, pt, b);
   if (!e) return;
@@ -129,6 +170,12 @@ static void handle_client(int fd) {
         post_mouse_move(get_i32(buf), get_i32(buf+4));
         break;
       }
+      case MSG_MOUSE_DRAG: {
+        uint8_t buf[9];
+        if (!recv_all(fd, buf, sizeof buf)) goto done;
+        post_mouse_drag(buf[0], get_i32(buf+1), get_i32(buf+5));
+        break;
+      }
       case MSG_MOUSE_DOWN: case MSG_MOUSE_UP: {
         uint8_t btn;
         if (!recv_all(fd, &btn, 1)) goto done;
@@ -147,6 +194,7 @@ static void handle_client(int fd) {
     }
   }
 done:
+  g_btn_down = -1;
   close(fd);
   fprintf(stderr, "[receiver] client disconnected\n");
 }
@@ -158,7 +206,7 @@ int main(int argc, char **argv) {
   g_screen_w = (int)bounds.size.width; g_screen_h = (int)bounds.size.height;
   g_cur_x = g_screen_w / 2; g_cur_y = g_screen_h / 2;
   g_src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-  fprintf(stderr, "[receiver] listening on %d, screen %dx%d\n", port, g_screen_w, g_screen_h);
+  fprintf(stderr, "[receiver] sync-helper v2, protocol v2, listening on %d, screen %dx%d\n", port, g_screen_w, g_screen_h);
   fprintf(stderr, "[receiver] STOP Deskflow on both machines before using this, or input may double.\n");
   int ls = socket(AF_INET, SOCK_STREAM, 0);
   if (ls < 0) { perror("socket"); return 1; }

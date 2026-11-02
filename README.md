@@ -329,6 +329,26 @@ menu can switch language without restarting.
   Bonjour resolve auto-corrected 550xe back to .11 and saved the
   migrated direction.
 
+- **v2.4.1 (2026-11-02, current)**: sync-helper only, no SyncBar
+  Swift change (SyncBar version bumped to 2.4.1 so the app and the
+  helper it ships can be verified together; Info.plist
+  CFBundleVersion is now also 2.4.1, it had lagged at 2.2.2).
+  sync-helper v2 fixes broadcast drag: v1 collapsed every
+  Left/Right/OtherMouseDragged into MSG_MOUSE_MOVE and the receiver
+  always posted kCGEventMouseMoved, so macOS never saw a Dragged
+  event and drag-and-drop, text selection drag, window drag and
+  Launchpad drag-to-switch-page all failed. v2 adds MSG_MOUSE_DRAG
+  (button + scaled coordinates), the receiver posts the matching
+  Dragged type, tracks the held button so a plain MOVE arriving
+  while a button is down is also re-posted as Dragged (v1-sender
+  fallback), and Down/Up are preceded by a MOVE to the exact event
+  location instead of relying on the last Move. Protocol v2 is
+  backward compatible one way only: a v2 receiver accepts v1
+  senders, but a v1 receiver drops a v2 sender on the unknown type,
+  so deploy v2 receivers on BOTH machines before v2 senders.
+  Rollback: v1 binaries are backed up on both machines at
+  ~/sync-helper/backup-sync-helper-v1-20261102/.
+
 ## Troubleshooting
 
 - **Menu shows `○ 停止` after switching**: read the status line, then
