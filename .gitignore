@@ -1,0 +1,22 @@
+# Build outputs and bundles
+# Note: do NOT add a bare "SyncBar" pattern here — it would ignore the
+# SyncBar/ source directory. The built binary lives inside *.app/,
+# which is already ignored below.
+*.app/
+sync-sender
+sync-receiver
+*.o
+build/
+
+# Logs
+*.log
+
+# Signing material — never commit certificates, keys or passwords
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.srl
+*.mobileprovision
+.DS_Store
