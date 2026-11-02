@@ -249,10 +249,40 @@ menu can switch language without restarting.
   `Deskflow.conf` (server/client per machine); broadcast target per
   machine; receiver posts to the session tap (loop guard); menu shows
   role, peer IP and receiver status.
-- **v2.1 (2026-11-01, current)**: Multilingual UI. Chinese, English,
+- **v2.1 (2026-11-01)**: Multilingual UI. Chinese, English,
   Japanese, French, German and Spanish, with a Follow System option and
   a Language submenu in the menu bar. No functional change to Edge or
   Broadcast behaviour.
+- **v2.2 (2026-11-01)**: 2-device management, manual IP/hostname entry
+  (Bonjour is deferred to v2.3). Devices live in
+  `~/Library/Application Support/SyncBar/devices.json` (one peer: name
+  + IP/hostname, plus this machine's role), migrated on first launch
+  from Deskflow.conf, deskflow-server.conf and syncbar-target.txt.
+  Menu gains "Set Peer Device…" (dialog) and "This Machine's Role"
+  (Server / Client). Saving a peer or switching role rewrites
+  Deskflow.conf (line-preserving: only coreMode, [server]
+  externalConfig/externalConfigFile and [client] remoteHost are
+  touched) and, for a server, the server links, then auto-restarts the
+  active child. Role switching terminates the Deskflow GUI first, or
+  the GUI would overwrite Deskflow.conf on exit.
+- **v2.2.1 (2026-11-01, current)**: Fixes the server-switch failure
+  found on a machine that was only ever a client: deskflow-core
+  server refuses to load its config without `[computer_*]` sections
+  ("unknown computer name", FATAL), so switching to server now
+  creates `[computer_<local>]` and `[computer_<peer>]` sections with
+  GUI defaults if missing. The peer dialog now refuses to save an IPv4
+  address as the peer name (server links match clients by computer
+  name, so an IP as a name silently breaks Edge); an empty name only
+  defaults to the address when the address is a hostname.
+  Reversed roles (c8dh server, 550xe client) were verified working
+  after two further findings: stock deskflow-core server can abort on
+  c8dh with a TIS thread race (SIGABRT in getKeyboardLayoutList, first
+  attempt 2026-11-01 22:53, second attempt survived — intermittent,
+  upstream, not a SyncBar config bug), and reversed TLS trust must be
+  established once per direction (copy each machine's existing trust
+  file to the opposite name: 550xe trusted-clients →
+  trusted-servers, c8dh trusted-servers → trusted-clients; same two
+  machines and certificates, just trusted in both directions).
 
 ## Troubleshooting
 
